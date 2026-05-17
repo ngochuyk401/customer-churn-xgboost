@@ -5,9 +5,11 @@ import plotly.figure_factory as ff
 import joblib
 from pathlib import Path
 import numpy as np
-from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, roc_curve, auc
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 from imblearn.over_sampling import SMOTE
 import google.generativeai as genai
 
@@ -82,90 +84,452 @@ tab1, tab2, tab3, tab4 = st.tabs(["🎯 Dự đoán", "📊 Phân tích mô tả
 
 # ===================== TAB 1: DỰ ĐOÁN =====================
 with tab1:
+
     st.subheader("🧾 Nhập thông tin khách hàng")
 
+    # =====================================================
+    # KHỞI TẠO SESSION STATE
+    # =====================================================
+    default_values = {
+        "gender": "Nam",
+        "senior": "Không",
+        "partner": "Không",
+        "dependents": "Không",
+        "tenure": 12,
+        "phone": "Có",
+        "multiple_lines": "Không",
+        "internet": "Cáp quang",
+        "contract": "Theo tháng",
+        "paperless": "Có",
+        "online_security": "Không",
+        "online_backup": "Không",
+        "device_protection": "Không",
+        "tech_support": "Không",
+        "streaming_tv": "Không",
+        "streaming_movies": "Không",
+        "payment_method": "Hóa đơn điện tử",
+        "monthly_charges": 70.0,
+        "total_charges": 1000.0
+    }
+
+    for key, value in default_values.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+    # =====================================================
+    # TẢI FILE KHÁCH HÀNG
+    # =====================================================
+    with st.expander("📂 Tải thông tin khách hàng từ file", expanded=False):
+
+        uploaded_customer = st.file_uploader(
+            "Tải file JSON hoặc TXT",
+            type=["json", "txt"],
+            key="customer_upload"
+        )
+
+        if uploaded_customer:
+
+            try:
+
+                import json
+
+                file_content = uploaded_customer.read().decode("utf-8")
+
+                # ================= JSON =================
+                if uploaded_customer.name.endswith(".json"):
+
+                    customer_data = json.loads(file_content)
+
+                # ================= TXT =================
+                else:
+
+                    customer_data = {}
+
+                    for line in file_content.splitlines():
+
+                        if ":" in line:
+                            key, value = line.split(":", 1)
+                            customer_data[key.strip()] = value.strip()
+
+                # ================= CẬP NHẬT SESSION =================
+                mapping_keys = {
+                    "gender": "gender",
+                    "SeniorCitizen": "senior",
+                    "Partner": "partner",
+                    "Dependents": "dependents",
+                    "tenure": "tenure",
+                    "PhoneService": "phone",
+                    "MultipleLines": "multiple_lines",
+                    "InternetService": "internet",
+                    "Contract": "contract",
+                    "PaperlessBilling": "paperless",
+                    "OnlineSecurity": "online_security",
+                    "OnlineBackup": "online_backup",
+                    "DeviceProtection": "device_protection",
+                    "TechSupport": "tech_support",
+                    "StreamingTV": "streaming_tv",
+                    "StreamingMovies": "streaming_movies",
+                    "PaymentMethod": "payment_method",
+                    "MonthlyCharges": "monthly_charges",
+                    "TotalCharges": "total_charges"
+                }
+
+                for file_key, session_key in mapping_keys.items():
+
+                    if file_key in customer_data:
+
+                        value = customer_data[file_key]
+
+                        # Ép kiểu số
+                        if session_key in ["tenure"]:
+                            value = int(value)
+
+                        if session_key in ["monthly_charges", "total_charges"]:
+                            value = float(value)
+
+                        st.session_state[session_key] = value
+
+                st.success("✅ Đã tải dữ liệu khách hàng thành công!")
+
+                st.write("### 👀 Dữ liệu đã tải")
+                st.json(customer_data)
+
+            except Exception as e:
+                st.error(f"Lỗi đọc file: {e}")
+
+    # =====================================================
+    # FORM NHẬP LIỆU
+    # =====================================================
     with st.expander("👤 Thông tin cá nhân & Dịch vụ cơ bản", expanded=True):
+
         c1 = st.columns(5)
-        gender = c1[0].selectbox("Giới tính", ["Nam", "Nữ"])
-        senior = c1[1].selectbox("Khách hàng cao tuổi", ["Không", "Có"])
-        partner = c1[2].selectbox("Có người thân", ["Không", "Có"])
-        dependents = c1[3].selectbox("Có người phụ thuộc", ["Không", "Có"])
-        tenure = c1[4].number_input("Thời gian sử dụng (tháng)", 0, 72, 12)
+
+        gender = c1[0].selectbox(
+            "Giới tính",
+            ["Nam", "Nữ"],
+            index=["Nam", "Nữ"].index(st.session_state.gender)
+        )
+
+        senior = c1[1].selectbox(
+            "Khách hàng cao tuổi",
+            ["Không", "Có"],
+            index=["Không", "Có"].index(st.session_state.senior)
+        )
+
+        partner = c1[2].selectbox(
+            "Có người thân",
+            ["Không", "Có"],
+            index=["Không", "Có"].index(st.session_state.partner)
+        )
+
+        dependents = c1[3].selectbox(
+            "Có người phụ thuộc",
+            ["Không", "Có"],
+            index=["Không", "Có"].index(st.session_state.dependents)
+        )
+
+        tenure = c1[4].number_input(
+            "Thời gian sử dụng (tháng)",
+            0,
+            72,
+            int(st.session_state.tenure)
+        )
 
         c2 = st.columns(5)
-        phone = c2[0].selectbox("Dịch vụ điện thoại", ["Có", "Không"])
-        multiple_lines = c2[1].selectbox("Nhiều đường dây", ["Không", "Có", "Không có DV điện thoại"])
-        internet = c2[2].selectbox("Internet", ["Cáp quang", "DSL", "Không sử dụng"])
-        contract = c2[3].selectbox("Loại hợp đồng", ["Theo tháng", "1 năm", "2 năm"])
-        paperless = c2[4].selectbox("Hóa đơn điện tử", ["Có", "Không"])
+
+        phone = c2[0].selectbox(
+            "Dịch vụ điện thoại",
+            ["Có", "Không"],
+            index=["Có", "Không"].index(st.session_state.phone)
+        )
+
+        multiple_lines = c2[1].selectbox(
+            "Nhiều đường dây",
+            ["Không", "Có", "Không có DV điện thoại"],
+            index=["Không", "Có", "Không có DV điện thoại"].index(st.session_state.multiple_lines)
+        )
+
+        internet = c2[2].selectbox(
+            "Internet",
+            ["Cáp quang", "DSL", "Không sử dụng"],
+            index=["Cáp quang", "DSL", "Không sử dụng"].index(st.session_state.internet)
+        )
+
+        contract = c2[3].selectbox(
+            "Loại hợp đồng",
+            ["Theo tháng", "1 năm", "2 năm"],
+            index=["Theo tháng", "1 năm", "2 năm"].index(st.session_state.contract)
+        )
+
+        paperless = c2[4].selectbox(
+            "Hóa đơn điện tử",
+            ["Có", "Không"],
+            index=["Có", "Không"].index(st.session_state.paperless)
+        )
 
     with st.expander("📦 Dịch vụ gia tăng & Thanh toán", expanded=True):
+
         c3 = st.columns(6)
-        online_security = c3[0].selectbox("Bảo mật trực tuyến", ["Không", "Có", "Không có Internet"])
-        online_backup = c3[1].selectbox("Sao lưu trực tuyến", ["Không", "Có", "Không có Internet"])
-        device_protection = c3[2].selectbox("Bảo vệ thiết bị", ["Không", "Có", "Không có Internet"])
-        tech_support = c3[3].selectbox("Hỗ trợ kỹ thuật", ["Không", "Có", "Không có Internet"])
-        streaming_tv = c3[4].selectbox("Streaming TV", ["Không", "Có", "Không có Internet"])
-        streaming_movies = c3[5].selectbox("Streaming Movies", ["Không", "Có", "Không có Internet"])
+
+        online_security = c3[0].selectbox(
+            "Bảo mật trực tuyến",
+            ["Không", "Có", "Không có Internet"],
+            index=["Không", "Có", "Không có Internet"].index(st.session_state.online_security)
+        )
+
+        online_backup = c3[1].selectbox(
+            "Sao lưu trực tuyến",
+            ["Không", "Có", "Không có Internet"],
+            index=["Không", "Có", "Không có Internet"].index(st.session_state.online_backup)
+        )
+
+        device_protection = c3[2].selectbox(
+            "Bảo vệ thiết bị",
+            ["Không", "Có", "Không có Internet"],
+            index=["Không", "Có", "Không có Internet"].index(st.session_state.device_protection)
+        )
+
+        tech_support = c3[3].selectbox(
+            "Hỗ trợ kỹ thuật",
+            ["Không", "Có", "Không có Internet"],
+            index=["Không", "Có", "Không có Internet"].index(st.session_state.tech_support)
+        )
+
+        streaming_tv = c3[4].selectbox(
+            "Streaming TV",
+            ["Không", "Có", "Không có Internet"],
+            index=["Không", "Có", "Không có Internet"].index(st.session_state.streaming_tv)
+        )
+
+        streaming_movies = c3[5].selectbox(
+            "Streaming Movies",
+            ["Không", "Có", "Không có Internet"],
+            index=["Không", "Có", "Không có Internet"].index(st.session_state.streaming_movies)
+        )
 
         c4 = st.columns(3)
-        payment_method = c4[0].selectbox("Phương thức thanh toán",
-            ["Hóa đơn điện tử", "Hóa đơn bưu điện", "Chuyển khoản ngân hàng", "Thẻ tín dụng"])
-        monthly_charges = c4[1].number_input("Chi phí hàng tháng (USD)", 0.0, 200.0, 70.0, step=0.5)
-        total_charges = c4[2].number_input("Tổng chi phí (USD)", 0.0, 10000.0, 1000.0, step=10.0)
 
-    if st.button("🔍 Dự đoán", type="primary", use_container_width=True):
+        payment_method = c4[0].selectbox(
+            "Phương thức thanh toán",
+            [
+                "Hóa đơn điện tử",
+                "Hóa đơn bưu điện",
+                "Chuyển khoản ngân hàng",
+                "Thẻ tín dụng"
+            ],
+            index=[
+                "Hóa đơn điện tử",
+                "Hóa đơn bưu điện",
+                "Chuyển khoản ngân hàng",
+                "Thẻ tín dụng"
+            ].index(st.session_state.payment_method)
+        )
+
+        monthly_charges = c4[1].number_input(
+            "Chi phí hàng tháng (USD)",
+            0.0,
+            200.0,
+            float(st.session_state.monthly_charges),
+            step=0.5
+        )
+
+        total_charges = c4[2].number_input(
+            "Tổng chi phí (USD)",
+            0.0,
+            10000.0,
+            float(st.session_state.total_charges),
+            step=10.0
+        )
+
+    # =====================================================
+    # NÚT CHỨC NĂNG
+    # =====================================================
+    left_btn, right_btn = st.columns(2)
+
+    with left_btn:
+
+        download_data = {
+            "gender": gender,
+            "SeniorCitizen": senior,
+            "Partner": partner,
+            "Dependents": dependents,
+            "tenure": tenure,
+            "PhoneService": phone,
+            "MultipleLines": multiple_lines,
+            "InternetService": internet,
+            "OnlineSecurity": online_security,
+            "OnlineBackup": online_backup,
+            "DeviceProtection": device_protection,
+            "TechSupport": tech_support,
+            "StreamingTV": streaming_tv,
+            "StreamingMovies": streaming_movies,
+            "Contract": contract,
+            "PaperlessBilling": paperless,
+            "PaymentMethod": payment_method,
+            "MonthlyCharges": monthly_charges,
+            "TotalCharges": total_charges
+        }
+
+        import json
+
+        st.download_button(
+            label="📥 Tải mẫu JSON",
+            data=json.dumps(download_data, indent=4, ensure_ascii=False),
+            file_name="customer_data.json",
+            mime="application/json",
+            use_container_width=True
+        )
+
+    with right_btn:
+
+        predict_btn = st.button(
+            "🔍 Dự đoán",
+            type="primary",
+            use_container_width=True
+        )
+
+    # =====================================================
+    # DỰ ĐOÁN
+    # =====================================================
+    if predict_btn:
+
         input_data = {
-            'gender': gender, 'SeniorCitizen': senior, 'Partner': partner, 'Dependents': dependents,
-            'tenure': tenure, 'PhoneService': phone, 'MultipleLines': multiple_lines,
-            'InternetService': internet, 'OnlineSecurity': online_security, 'OnlineBackup': online_backup,
-            'DeviceProtection': device_protection, 'TechSupport': tech_support, 'StreamingTV': streaming_tv,
-            'StreamingMovies': streaming_movies, 'Contract': contract, 'PaperlessBilling': paperless,
-            'PaymentMethod': payment_method, 'MonthlyCharges': monthly_charges, 'TotalCharges': total_charges
+            'gender': gender,
+            'SeniorCitizen': senior,
+            'Partner': partner,
+            'Dependents': dependents,
+            'tenure': tenure,
+            'PhoneService': phone,
+            'MultipleLines': multiple_lines,
+            'InternetService': internet,
+            'OnlineSecurity': online_security,
+            'OnlineBackup': online_backup,
+            'DeviceProtection': device_protection,
+            'TechSupport': tech_support,
+            'StreamingTV': streaming_tv,
+            'StreamingMovies': streaming_movies,
+            'Contract': contract,
+            'PaperlessBilling': paperless,
+            'PaymentMethod': payment_method,
+            'MonthlyCharges': monthly_charges,
+            'TotalCharges': total_charges
         }
 
         from preprocessing.preprocess import preprocess_input
+
         processed_df = preprocess_input(input_data)
 
-        model_files = {"XGBoost": "xgb_model.pkl", "Random Forest": "rf_model.pkl", "SVM": "svm_model.pkl"}
+        model_files = {
+            "XGBoost": "xgb_model.pkl",
+            "Random Forest": "rf_model.pkl",
+            "SVM": "svm_model.pkl"
+        }
+
         model = joblib.load(model_files[model_name])
 
         proba = model.predict_proba(processed_df)[0][1]
+
         prediction = 1 if proba >= threshold else 0
 
         st.markdown("---")
-        if prediction == 1:
-            st.error(f"⚠️ **KHÁCH HÀNG CÓ NGUY CƠ RỜI BỎ** (Xác suất: {proba:.1%})")
-            st.info("💡 Khuyến nghị: Gửi ưu đãi giữ chân, liên hệ chăm sóc khách hàng khẩn cấp.")
-        else:
-            st.success(f"✅ **KHÁCH HÀNG Ở LẠI** (Xác suất churn: {proba:.1%})")
 
+        # ================= KẾT QUẢ =================
+        if prediction == 1:
+
+            st.error(
+                f"⚠️ KHÁCH HÀNG CÓ NGUY CƠ RỜI BỎ "
+                f"(Xác suất: {proba:.1%})"
+            )
+
+            st.info(
+                "💡 Khuyến nghị: Gửi ưu đãi giữ chân "
+                "và liên hệ chăm sóc khách hàng."
+            )
+
+        else:
+
+            st.success(
+                f"✅ KHÁCH HÀNG Ở LẠI "
+                f"(Xác suất churn: {proba:.1%})"
+            )
+
+        # ================= HIỂN THỊ =================
         col_left, col_right = st.columns([2, 1])
+
         with col_left:
-            with st.expander("📋 Thông tin khách hàng đã nhập", expanded=True):
-                st.dataframe(pd.DataFrame([input_data]), use_container_width=True)
-            with st.expander("🔧 Dữ liệu sau tiền xử lý (30 cột)", expanded=False):
-                st.dataframe(processed_df, use_container_width=True)
+
+            with st.expander(
+                "📋 Thông tin khách hàng đã nhập",
+                expanded=True
+            ):
+
+                st.dataframe(
+                    pd.DataFrame([input_data]),
+                    use_container_width=True
+                )
+
+            with st.expander(
+                "🔧 Dữ liệu sau tiền xử lý (30 cột)",
+                expanded=False
+            ):
+
+                st.dataframe(
+                    processed_df,
+                    use_container_width=True
+                )
 
         with col_right:
-            fig_gauge = px.pie(values=[proba, 1-proba], names=['Churn', 'Không churn'],
-                               color_discrete_sequence=['#ef4444', '#22c55e'], hole=0.7)
-            fig_gauge.update_layout(title="Xác suất churn", height=320)
-            st.plotly_chart(fig_gauge, use_container_width=True)
 
-        with st.expander("🤖 AI Giải thích dự đoán", expanded=True):
+            fig_gauge = px.pie(
+                values=[proba, 1 - proba],
+                names=['Churn', 'Không churn'],
+                color_discrete_sequence=['#ef4444', '#22c55e'],
+                hole=0.7
+            )
+
+            fig_gauge.update_layout(
+                title="Xác suất churn",
+                height=320
+            )
+
+            st.plotly_chart(
+                fig_gauge,
+                use_container_width=True
+            )
+
+        # ================= AI GIẢI THÍCH =================
+        with st.expander(
+            "🤖 AI Giải thích dự đoán",
+            expanded=True
+        ):
+
             explain_prompt = f"""
-            Khách hàng có: thời gian sử dụng {tenure} tháng, hợp đồng {contract}, 
-            chi phí tháng {monthly_charges} USD, tổng chi phí {total_charges} USD, 
-            phương thức thanh toán {payment_method}.
+            Khách hàng có:
+            - Thời gian sử dụng: {tenure} tháng
+            - Hợp đồng: {contract}
+            - Chi phí hàng tháng: {monthly_charges} USD
+            - Tổng chi phí: {total_charges} USD
+            - Phương thức thanh toán: {payment_method}
+
             Mô hình dự đoán xác suất churn = {proba:.1%}.
-            Giải thích ngắn gọn lý do và các yếu tố chính ảnh hưởng đến kết quả này.
+
+            Hãy giải thích ngắn gọn:
+            - Vì sao mô hình dự đoán như vậy
+            - Các yếu tố ảnh hưởng chính
+            - Gợi ý giữ chân khách hàng
             """
+
             try:
+
                 response = model_ai.generate_content(explain_prompt)
+
                 st.markdown(response.text)
+
             except:
-                st.write("Không thể lấy giải thích từ AI lúc này.")
+
+                st.write(
+                    "Không thể lấy giải thích từ AI lúc này."
+                )
 
 # ===================== TAB 2: PHÂN TÍCH MÔ TẢ =====================
 with tab2:
@@ -174,146 +538,484 @@ with tab2:
 
     if uploaded_file:
         df = pd.read_csv(uploaded_file)
+
         st.success(f"Đã tải: {uploaded_file.name} — {len(df)} dòng")
 
+        # ===================== XEM DỮ LIỆU =====================
         with st.expander("👀 Xem trước dữ liệu thô"):
             st.dataframe(df.head(10), use_container_width=True)
 
+        # ===================== THỐNG KÊ =====================
         st.subheader("📈 Thống kê mô tả")
         st.dataframe(df.describe(include='all'), use_container_width=True)
 
-        is_ptmt = 'Churn' in df.columns and df['Churn'].dtype == 'object'
-
-        st.subheader("🔍 Phân tích đơn biến")
-        col_type = st.radio("Loại biến", ["Biến định lượng", "Biến định tính"], horizontal=True)
-
+        # ===================== PHÂN LOẠI CỘT =====================
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
         cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
 
+        # ===================== PHÂN TÍCH ĐƠN BIẾN =====================
+        st.subheader("🔍 Phân tích đơn biến")
+
+        col_type = st.radio(
+            "Loại biến",
+            ["Biến định lượng", "Biến định tính"],
+            horizontal=True
+        )
+
         if col_type == "Biến định lượng":
-            col = st.selectbox("Chọn biến định lượng", numeric_cols, key="num_single")
-            c1, c2 = st.columns(2)
-            with c1: st.plotly_chart(px.histogram(df, x=col, nbins=30, title=f"Histogram - {col}"), use_container_width=True)
-            with c2: st.plotly_chart(px.box(df, y=col, title=f"Boxplot - {col}"), use_container_width=True)
-        else:
-            col = st.selectbox("Chọn biến định tính", cat_cols, key="cat_single")
-            c1, c2 = st.columns(2)
-            with c1: st.plotly_chart(px.pie(df, names=col, title=f"Pie chart - {col}"), use_container_width=True)
-            with c2: st.plotly_chart(px.histogram(df, x=col, title=f"Bar chart - {col}"), use_container_width=True)
 
-        if is_ptmt:
-            st.subheader("🔗 Phân tích đa biến theo Churn")
-            option = st.selectbox("Chọn loại biểu đồ",
-                ["Boxplot theo Churn", "Bar chart theo Churn", "Scatter plot", "Heatmap tương quan"], key="multivar")
-
-            if option == "Boxplot theo Churn":
-                col = st.selectbox("Chọn biến định lượng", numeric_cols, key="box_churn")
-                fig = px.box(df, x="Churn", y=col, color="Churn", title=f"{col} theo Churn")
-                st.plotly_chart(fig, use_container_width=True)
-            elif option == "Bar chart theo Churn":
-                col = st.selectbox("Chọn biến định tính", [c for c in cat_cols if c != "Churn"], key="bar_churn")
-                fig = px.histogram(df, x=col, color="Churn", barmode="group", title=f"{col} theo Churn")
-                st.plotly_chart(fig, use_container_width=True)
-            elif option == "Scatter plot":
-                x = st.selectbox("Trục X", numeric_cols, key="scatter_x")
-                y = st.selectbox("Trục Y", [c for c in numeric_cols if c != x], key="scatter_y")
-                fig = px.scatter(df, x=x, y=y, color="Churn", title=f"{x} vs {y} theo Churn")
-                st.plotly_chart(fig, use_container_width=True)
+            if len(numeric_cols) == 0:
+                st.warning("Không có biến định lượng trong dataset.")
             else:
-                corr = df[numeric_cols].corr()
-                fig = ff.create_annotated_heatmap(
-                    z=corr.values.round(2),
-                    x=list(corr.columns),
-                    y=list(corr.columns),
-                    colorscale='RdBu',
-                    showscale=True
+                col = st.selectbox(
+                    "Chọn biến định lượng",
+                    numeric_cols,
+                    key="num_single"
                 )
-                fig.update_layout(title="Heatmap tương quan giữa các biến định lượng", height=650)
-                st.plotly_chart(fig, use_container_width=True)
+
+                c1, c2 = st.columns(2)
+
+                with c1:
+                    fig_hist = px.histogram(
+                        df,
+                        x=col,
+                        nbins=30,
+                        title=f"Histogram - {col}"
+                    )
+                    st.plotly_chart(fig_hist, use_container_width=True)
+
+                with c2:
+                    fig_box = px.box(
+                        df,
+                        y=col,
+                        title=f"Boxplot - {col}"
+                    )
+                    st.plotly_chart(fig_box, use_container_width=True)
+
+        else:
+
+            if len(cat_cols) == 0:
+                st.warning("Không có biến định tính trong dataset.")
+            else:
+                col = st.selectbox(
+                    "Chọn biến định tính",
+                    cat_cols,
+                    key="cat_single"
+                )
+
+                c1, c2 = st.columns(2)
+
+                with c1:
+                    fig_pie = px.pie(
+                        df,
+                        names=col,
+                        title=f"Pie chart - {col}"
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+
+                with c2:
+                    fig_bar = px.histogram(
+                        df,
+                        x=col,
+                        title=f"Bar chart - {col}"
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+        # ===================== PHÂN TÍCH ĐA BIẾN =====================
+        st.subheader("🔗 Phân tích đa biến")
+
+        with st.expander("⚙️ Cấu hình phân tích đa biến", expanded=False):
+
+            target_col = st.selectbox(
+                "Chọn cột target (phân loại 2 nhóm)",
+                df.columns
+            )
+
+        # ===================== KIỂM TRA TARGET =====================
+        if df[target_col].nunique() != 2:
+
+            st.warning(
+                "⚠️ Cột target nên có đúng 2 nhóm giá trị "
+                "(ví dụ: 0/1, Yes/No, True/False)."
+            )
+
+        else:
+
+            option = st.selectbox(
+                "Chọn loại biểu đồ",
+                [
+                    "Boxplot theo Target",
+                    "Bar chart theo Target",
+                    "Scatter plot",
+                    "Heatmap tương quan"
+                ],
+                key="multivar"
+            )
+
+            # ===================== BOXPLOT =====================
+            if option == "Boxplot theo Target":
+
+                if len(numeric_cols) == 0:
+                    st.warning("Không có biến định lượng.")
+                else:
+
+                    col = st.selectbox(
+                        "Chọn biến định lượng",
+                        numeric_cols,
+                        key="box_target"
+                    )
+
+                    fig = px.box(
+                        df,
+                        x=target_col,
+                        y=col,
+                        color=target_col,
+                        title=f"{col} theo {target_col}"
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # ===================== BAR CHART =====================
+            elif option == "Bar chart theo Target":
+
+                filtered_cat_cols = [
+                    c for c in cat_cols if c != target_col
+                ]
+
+                if len(filtered_cat_cols) == 0:
+                    st.warning("Không có biến định tính phù hợp.")
+                else:
+
+                    col = st.selectbox(
+                        "Chọn biến định tính",
+                        filtered_cat_cols,
+                        key="bar_target"
+                    )
+
+                    fig = px.histogram(
+                        df,
+                        x=col,
+                        color=target_col,
+                        barmode="group",
+                        title=f"{col} theo {target_col}"
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # ===================== SCATTER =====================
+            elif option == "Scatter plot":
+
+                if len(numeric_cols) < 2:
+                    st.warning("Cần ít nhất 2 biến định lượng.")
+                else:
+
+                    x = st.selectbox(
+                        "Trục X",
+                        numeric_cols,
+                        key="scatter_x"
+                    )
+
+                    y = st.selectbox(
+                        "Trục Y",
+                        [c for c in numeric_cols if c != x],
+                        key="scatter_y"
+                    )
+
+                    fig = px.scatter(
+                        df,
+                        x=x,
+                        y=y,
+                        color=target_col,
+                        title=f"{x} vs {y} theo {target_col}"
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # ===================== HEATMAP =====================
+            else:
+
+                if len(numeric_cols) < 2:
+                    st.warning("Cần ít nhất 2 biến định lượng.")
+                else:
+
+                    corr = df[numeric_cols].corr()
+
+                    fig = ff.create_annotated_heatmap(
+                        z=corr.values.round(2),
+                        x=list(corr.columns),
+                        y=list(corr.columns),
+                        colorscale='RdBu',
+                        showscale=True
+                    )
+
+                    fig.update_layout(
+                        title="Heatmap tương quan giữa các biến định lượng",
+                        height=650
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
 
 # ===================== TAB 3: SO SÁNH MÔ HÌNH =====================
 with tab3:
+
     st.subheader("⚖️ So sánh mô hình")
-    uploaded_compare = st.file_uploader("Tải dataset (.csv) để so sánh", type="csv", key="compare_file")
+
+    uploaded_compare = st.file_uploader(
+        "Tải dataset (.csv) để so sánh",
+        type="csv",
+        key="compare_file"
+    )
 
     if uploaded_compare:
+
         df_comp = pd.read_csv(uploaded_compare)
-        target_col = st.selectbox("Chọn cột Target (0/1)", df_comp.columns)
 
-        if st.button("So sánh", type="primary"):
-            with st.spinner("Đang huấn luyện và đánh giá mô hình bằng kiểm định chéo 10-fold... Vui lòng chờ một chút"):
-                X = df_comp.drop(columns=[target_col]).select_dtypes(include=np.number)
-                y = df_comp[target_col]
+        target_col = st.selectbox(
+            "Chọn cột Target",
+            df_comp.columns
+        )
 
-                if X.shape[1] != 30:
-                    st.warning("⚠️ Dataset có ít cột số hơn mô hình được huấn luyện. "
-                               "Kết quả có thể không chính xác. Nên dùng file tiền xử lý đã dùng để huấn luyện mô hình.")
+        # =====================================================
+        # KIỂM TRA TARGET
+        # =====================================================
+        unique_values = df_comp[target_col].dropna().unique()
 
-                skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-                model_files = {"XGBoost": "xgb_model.pkl", "Random Forest": "rf_model.pkl", "SVM": "svm_model.pkl"}
+        st.info(f"Số nhóm trong target: {len(unique_values)}")
 
-                results = {}
-                roc_data = {}
+        with st.expander("👀 Xem giá trị target"):
+            st.write(unique_values)
 
-                for name, fname in model_files.items():
-                    try:
-                        model = joblib.load(fname)
-                        precision_list, recall_list, f1_list, auc_list = [], [], [], []
-                        fpr_list, tpr_list = [], []
+        is_binary = len(unique_values) == 2
 
-                        for train_idx, test_idx in skf.split(X, y):
-                            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-                            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        if not is_binary:
 
-                            scaler = StandardScaler()
-                            X_train = scaler.fit_transform(X_train)
-                            X_test = scaler.transform(X_test)
+            st.warning(
+                "⚠️ Cột target phải là bài toán phân loại nhị phân "
+                "(ví dụ: 0/1, Yes/No, True/False...)."
+            )
 
-                            smote = SMOTE(random_state=42)
-                            X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+        else:
 
+            st.success("✅ Target hợp lệ cho bài toán phân loại nhị phân.")
+
+            if st.button("So sánh", type="primary"):
+
+                with st.spinner(
+                    "Đang huấn luyện và đánh giá mô hình..."
+                ):
+
+                    # =====================================================
+                    # TÁCH X VÀ y
+                    # =====================================================
+                    X = df_comp.drop(columns=[target_col]).select_dtypes(include=np.number)
+                    y = df_comp[target_col]
+
+                    # =====================================================
+                    # CHUYỂN TARGET VỀ 0/1 NẾU CẦN
+                    # =====================================================
+                    if y.dtype == "object":
+
+                        unique_sorted = sorted(y.unique())
+
+                        mapping = {
+                            unique_sorted[0]: 0,
+                            unique_sorted[1]: 1
+                        }
+
+                        y = y.map(mapping)
+
+                    # =====================================================
+                    # CHIA TRAIN / TEST
+                    # =====================================================
+                    from sklearn.model_selection import train_test_split
+
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X,
+                        y,
+                        test_size=0.2,
+                        stratify=y,
+                        random_state=42
+                    )
+
+                    # =====================================================
+                    # SCALE
+                    # =====================================================
+                    scaler = StandardScaler()
+
+                    X_train = scaler.fit_transform(X_train)
+                    X_test = scaler.transform(X_test)
+
+                    # =====================================================
+                    # SMOTE
+                    # =====================================================
+                    smote = SMOTE(random_state=42)
+
+                    X_train_res, y_train_res = smote.fit_resample(
+                        X_train,
+                        y_train
+                    )
+
+                    # =====================================================
+                    # TÍNH scale_pos_weight CHO XGBOOST
+                    # =====================================================
+                    label_counts = y_train.value_counts()
+
+                    scale_pos_weight = (
+                        label_counts.iloc[0] / label_counts.iloc[1]
+                    )
+
+                    # =====================================================
+                    # KHAI BÁO MÔ HÌNH
+                    # =====================================================
+                    models = {
+
+                        "SVM": SVC(
+                            kernel="linear",
+                            probability=True,
+                            cache_size=500
+                        ),
+
+                        "Random Forest": RandomForestClassifier(
+                            n_estimators=100,
+                            class_weight="balanced",
+                            random_state=42,
+                            n_jobs=-1
+                        ),
+
+                        "XGBoost": XGBClassifier(
+                            n_estimators=100,
+                            max_depth=6,
+                            learning_rate=0.1,
+                            scale_pos_weight=scale_pos_weight,
+                            eval_metric="logloss",
+                            random_state=42,
+                            n_jobs=-1
+                        )
+                    }
+
+                    results = {}
+
+                    fig_roc = px.line(
+                        title="Đường cong ROC so sánh 3 mô hình"
+                    )
+
+                    # =====================================================
+                    # TRAIN + ĐÁNH GIÁ
+                    # =====================================================
+                    for name, model in models.items():
+
+                        try:
+
+                            # ================= TRAIN =================
                             model.fit(X_train_res, y_train_res)
+
+                            # ================= PREDICT =================
                             y_pred = model.predict(X_test)
+
                             y_prob = model.predict_proba(X_test)[:, 1]
 
-                            precision_list.append(precision_score(y_test, y_pred))
-                            recall_list.append(recall_score(y_test, y_pred))
-                            f1_list.append(f1_score(y_test, y_pred))
-                            auc_list.append(roc_auc_score(y_test, y_prob))
+                            # ================= METRICS =================
+                            precision = precision_score(y_test, y_pred)
 
+                            recall = recall_score(y_test, y_pred)
+
+                            f1 = f1_score(y_test, y_pred)
+
+                            roc_auc = roc_auc_score(y_test, y_prob)
+
+                            results[name] = {
+                                "Precision": precision,
+                                "Recall": recall,
+                                "F1-score": f1,
+                                "ROC-AUC": roc_auc
+                            }
+
+                            # ================= ROC CURVE =================
                             fpr, tpr, _ = roc_curve(y_test, y_prob)
-                            fpr_list.append(fpr)
-                            tpr_list.append(tpr)
 
-                        results[name] = {
-                            "Precision": np.mean(precision_list),
-                            "Recall": np.mean(recall_list),
-                            "F1-score": np.mean(f1_list),
-                            "ROC-AUC": np.mean(auc_list)
-                        }
-                        roc_data[name] = (fpr_list, tpr_list)
+                            fig_roc.add_scatter(
+                                x=fpr,
+                                y=tpr,
+                                mode="lines",
+                                name=f"{name} (AUC={roc_auc:.3f})"
+                            )
 
-                    except Exception as e:
-                        st.error(f"Lỗi với mô hình {name}: {e}")
+                        except Exception as e:
 
-                if results:
-                    result_df = pd.DataFrame(results).T
-                    st.dataframe(result_df.style.highlight_max(axis=0), use_container_width=True)
+                            st.error(f"Lỗi với mô hình {name}: {e}")
 
-                    # Biểu đồ cột Mean
-                    melted = result_df.reset_index().melt(id_vars="index", var_name="Metric", value_name="Score")
-                    fig_bar = px.bar(melted, x="Metric", y="Score", color="index", barmode="group",
-                                     title="So sánh hiệu suất trung bình của 3 mô hình")
-                    st.plotly_chart(fig_bar, use_container_width=True)
+                    # =====================================================
+                    # HIỂN THỊ KẾT QUẢ
+                    # =====================================================
+                    if results:
 
-                    # ROC Curve
-                    fig_roc = px.line(title="Đường cong ROC so sánh 3 mô hình")
-                    for name, (fpr_list, tpr_list) in roc_data.items():
-                        mean_fpr = np.linspace(0, 1, 100)
-                        mean_tpr = np.mean([np.interp(mean_fpr, fpr, tpr) for fpr, tpr in zip(fpr_list, tpr_list)], axis=0)
-                        fig_roc.add_scatter(x=mean_fpr, y=mean_tpr, name=f"{name} (AUC={results[name]['ROC-AUC']:.3f})")
-                    fig_roc.add_shape(type='line', x0=0, y0=0, x1=1, y1=1, line=dict(dash='dash', color='gray'))
-                    st.plotly_chart(fig_roc, use_container_width=True)
+                        result_df = pd.DataFrame(results).T
+
+                        st.subheader("📋 Bảng kết quả")
+
+                        st.dataframe(
+                            result_df.style.highlight_max(axis=0),
+                            use_container_width=True
+                        )
+
+                        # =====================================================
+                        # BIỂU ĐỒ CỘT
+                        # =====================================================
+                        st.subheader("📊 Biểu đồ so sánh")
+
+                        melted = result_df.reset_index().melt(
+                            id_vars="index",
+                            var_name="Metric",
+                            value_name="Score"
+                        )
+
+                        fig_bar = px.bar(
+                            melted,
+                            x="Metric",
+                            y="Score",
+                            color="index",
+                            barmode="group",
+                            title="So sánh hiệu suất 3 mô hình"
+                        )
+
+                        st.plotly_chart(
+                            fig_bar,
+                            use_container_width=True
+                        )
+
+                        # =====================================================
+                        # ROC CURVE
+                        # =====================================================
+                        fig_roc.add_shape(
+                            type='line',
+                            x0=0,
+                            y0=0,
+                            x1=1,
+                            y1=1,
+                            line=dict(
+                                dash='dash',
+                                color='gray'
+                            )
+                        )
+
+                        fig_roc.update_layout(
+                            xaxis_title="False Positive Rate",
+                            yaxis_title="True Positive Rate"
+                        )
+
+                        st.plotly_chart(
+                            fig_roc,
+                            use_container_width=True
+                        )
+
+                        # =====================================================
+                        # MÔ HÌNH TỐT NHẤT
+                        # =====================================================
+                        best_model = result_df["ROC-AUC"].idxmax()
+
+                        st.success(
+                            f"🏆 Mô hình có ROC-AUC cao nhất: {best_model}"
+                        )
 
 # ===================== TAB 4: TRỢ LÝ AI =====================
 with tab4:
